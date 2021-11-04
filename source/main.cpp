@@ -1,10 +1,13 @@
-#include "ei_run_classifier.h"
-
+#include <stdio.h>
 #include <hardware/gpio.h>
 #include <hardware/irq.h>
 #include <hardware/uart.h>
 #include <pico/stdio_usb.h>
-#include <stdio.h>
+#include <pico/stdlib.h>
+#include <pico/multicore.h>
+#include <pico/util/queue.h>
+#include "ei_run_classifier.h"
+#include "fake_data2.h"
 
 #define UART_ID uart0
 #define BAUD_RATE 115200
@@ -19,6 +22,8 @@ const uint LED_PIN = 25;
 bool linked = false;
 bool first = true;
 uint16_t send_index = 0;
+queue_t results_queue;
+queue_t data_queue;
 
 #ifndef DO_NOT_OUTPUT_TO_UART
 // RX interrupt handler
@@ -27,14 +32,18 @@ bool start_flag = false;
 int receive_index = 0;
 uint8_t previous_ch = 0;
 
-static const float features[] = {
+// static const float features[] = {
     // copy raw features here (for example from the 'Live classification' page)
 
-};
+// };
+int features_offset = 0;
+int current_samples_loaded = 0;
 
 int raw_feature_get_data(size_t offset, size_t length, float *out_ptr)
 {
-  memcpy(out_ptr, features + offset, length * sizeof(float));
+  for(int i = 0; i < length; i++) {
+    queue_remove_blocking(&data_queue, &out_ptr[i]);
+  }
   return 0;
 }
 
@@ -104,68 +113,84 @@ void setup_uart()
 }
 #endif
 
-int main()
-{
-  stdio_usb_init();
-  setup_uart();
+void core1_entry() {
+  ei_impulse_result_t result = {nullptr};
+  signal_t features_signal;
 
+  // init LED
   gpio_init(LED_PIN);
   gpio_set_dir(LED_PIN, GPIO_OUT);
 
-  ei_impulse_result_t result = {nullptr};
+  features_signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
+  features_signal.get_data = &raw_feature_get_data;
+
+  while (1) {
+    // invoke the impulse
+    EI_IMPULSE_ERROR res = run_classifier(&features_signal, &result, false);
+    if (res != 0)
+      continue;
+
+    queue_add_blocking(&results_queue, &result);
+
+    // toggle LED
+    gpio_put(LED_PIN, !gpio_get(LED_PIN));
+  }
+}
+
+int main()
+{
+  ei_impulse_result_t res = {nullptr};
+
+  stdio_init_all();
+  setup_uart();
+
+  multicore_launch_core1(core1_entry);
+
+  queue_init(&results_queue, sizeof(ei_impulse_result_t), 2);
+  // add space for 4 additional samples to avoid blocking main thread
+  queue_init(&data_queue, sizeof(float), EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE + 4);
 
   while (true)
   {
-    ei_printf("Edge Impulse standalone inferencing (Raspberry Pi Pico)\n");
-
-    if (sizeof(features) / sizeof(float) != EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE)
-    {
-      ei_printf("The size of your 'features' array is not correct. Expected %d items, but had %u\n",
-                EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, sizeof(features) / sizeof(float));
-      return 1;
-    }
+    ei_printf("Edge Impulse standalone inferencing on multicore (Raspberry Pi Pico) %s\n", __TIME__);
 
     while (1)
     {
-      // blink LED
-      gpio_put(LED_PIN, !gpio_get(LED_PIN));
+      if(queue_try_remove(&results_queue, &res)) {
+        ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d ms.): \n",
+                  res.timing.dsp, res.timing.classification, res.timing.anomaly);
 
-      // the features are stored into flash, and we don't want to load everything into RAM
-      signal_t features_signal;
-      features_signal.total_length = sizeof(features) / sizeof(features[0]);
-      features_signal.get_data = &raw_feature_get_data;
-
-      // invoke the impulse
-      EI_IMPULSE_ERROR res = run_classifier(&features_signal, &result, true);
-
-      ei_printf("run_classifier returned: %d\n", res);
-
-      if (res != 0)
-        return 1;
-
-      ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d ms.): \n",
-                result.timing.dsp, result.timing.classification, result.timing.anomaly);
-
-      // print the predictions
-      ei_printf("[");
-      for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++)
-      {
-        ei_printf("%.5f", result.classification[ix].value);
-#if EI_CLASSIFIER_HAS_ANOMALY == 1
-        ei_printf(", ");
-#else
-        if (ix != EI_CLASSIFIER_LABEL_COUNT - 1)
+        // print the predictions
+        ei_printf("[");
+        for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++)
         {
+          ei_printf("%.5f", res.classification[ix].value);
+  #if EI_CLASSIFIER_HAS_ANOMALY == 1
           ei_printf(", ");
+  #else
+          if (ix != EI_CLASSIFIER_LABEL_COUNT - 1)
+          {
+            ei_printf(", ");
+          }
+  #endif
         }
-#endif
+  #if EI_CLASSIFIER_HAS_ANOMALY == 1
+        printf("%.3f", res.anomaly);
+  #endif
+        printf("]\n");
+        ei_sleep(2000);
       }
-#if EI_CLASSIFIER_HAS_ANOMALY == 1
-      printf("%.3f", result.anomaly);
-#endif
-      printf("]\n");
 
-      ei_sleep(2000);
+      // add samples to queue, one sample per main loop iteration (like using real sensor)
+      for(int i = 0; i < EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME; i++) {
+        if(queue_try_add(&data_queue, &features[features_offset + i]) == false) {
+          // ei_printf("Data queue full!\n");
+          break;
+        }
+      }
+      if((features_offset += EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME) >= features_size) {
+        features_offset = 0;
+      }
     }
   }
 }
