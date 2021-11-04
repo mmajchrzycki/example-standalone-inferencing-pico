@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include <hardware/gpio.h>
 #include <hardware/irq.h>
 #include <hardware/uart.h>
@@ -6,8 +7,10 @@
 #include <pico/stdlib.h>
 #include <pico/multicore.h>
 #include <pico/util/queue.h>
-#include "ei_run_classifier.h"
-#include "fake_data2.h"
+#include "ei_classifier_types.h"
+#include "porting/ei_classifier_porting.h"
+#include "core1_thread.h"
+#include "fake_data.h"
 
 #define UART_ID uart0
 #define BAUD_RATE 115200
@@ -17,13 +20,9 @@
 #define UART_TX_PIN 0
 #define UART_RX_PIN 1
 
-const uint LED_PIN = 25;
-
 bool linked = false;
 bool first = true;
-uint16_t send_index = 0;
-queue_t results_queue;
-queue_t data_queue;
+int features_offset = 0;
 
 #ifndef DO_NOT_OUTPUT_TO_UART
 // RX interrupt handler
@@ -31,21 +30,6 @@ uint8_t command[32] = {0};
 bool start_flag = false;
 int receive_index = 0;
 uint8_t previous_ch = 0;
-
-// static const float features[] = {
-    // copy raw features here (for example from the 'Live classification' page)
-
-// };
-int features_offset = 0;
-int current_samples_loaded = 0;
-
-int raw_feature_get_data(size_t offset, size_t length, float *out_ptr)
-{
-  for(int i = 0; i < length; i++) {
-    queue_remove_blocking(&data_queue, &out_ptr[i]);
-  }
-  return 0;
-}
 
 void on_uart_rx()
 {
@@ -113,46 +97,17 @@ void setup_uart()
 }
 #endif
 
-void core1_entry() {
-  ei_impulse_result_t result = {nullptr};
-  signal_t features_signal;
-
-  // init LED
-  gpio_init(LED_PIN);
-  gpio_set_dir(LED_PIN, GPIO_OUT);
-
-  features_signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
-  features_signal.get_data = &raw_feature_get_data;
-
-  while (1) {
-    // invoke the impulse
-    EI_IMPULSE_ERROR res = run_classifier(&features_signal, &result, false);
-    if (res != 0)
-      continue;
-
-    queue_add_blocking(&results_queue, &result);
-
-    // toggle LED
-    gpio_put(LED_PIN, !gpio_get(LED_PIN));
-  }
-}
-
 int main()
 {
   ei_impulse_result_t res = {nullptr};
 
   stdio_init_all();
   setup_uart();
-
-  multicore_launch_core1(core1_entry);
-
-  queue_init(&results_queue, sizeof(ei_impulse_result_t), 2);
-  // add space for 4 additional samples to avoid blocking main thread
-  queue_init(&data_queue, sizeof(float), EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE + 4);
+  core1_run();
 
   while (true)
   {
-    ei_printf("Edge Impulse standalone inferencing on multicore (Raspberry Pi Pico) %s\n", __TIME__);
+    ei_printf("Edge Impulse standalone inferencing on multicore (Raspberry Pi Pico)\n");
 
     while (1)
     {
@@ -165,18 +120,18 @@ int main()
         for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++)
         {
           ei_printf("%.5f", res.classification[ix].value);
-  #if EI_CLASSIFIER_HAS_ANOMALY == 1
+#if EI_CLASSIFIER_HAS_ANOMALY == 1
           ei_printf(", ");
-  #else
+#else
           if (ix != EI_CLASSIFIER_LABEL_COUNT - 1)
           {
             ei_printf(", ");
           }
-  #endif
+#endif
         }
-  #if EI_CLASSIFIER_HAS_ANOMALY == 1
+#if EI_CLASSIFIER_HAS_ANOMALY == 1
         printf("%.3f", res.anomaly);
-  #endif
+#endif
         printf("]\n");
         ei_sleep(2000);
       }

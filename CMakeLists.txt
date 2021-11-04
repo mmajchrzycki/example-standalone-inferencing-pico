@@ -13,6 +13,7 @@ pico_sdk_init()
 
 add_executable(pico_standalone
   source/main.cpp
+  source/core1_thread.cpp
   source/ei_classifier_porting.cpp
   )
 
