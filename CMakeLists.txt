@@ -14,12 +14,13 @@ pico_sdk_init()
 add_executable(pico_standalone
   source/main.cpp
   source/core1_thread.cpp
+  source/accelerometer.cpp
   source/ei_classifier_porting.cpp
   )
 
 include(${MODEL_FOLDER}/edge-impulse-sdk/cmake/utils.cmake)
 
-target_link_libraries(pico_standalone pico_stdlib pico_multicore)
+target_link_libraries(pico_standalone pico_stdlib pico_multicore hardware_i2c)
 
 # enable usb output, disable uart output
 pico_enable_stdio_usb(pico_standalone 1)

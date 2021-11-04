@@ -10,7 +10,7 @@
 #include "ei_classifier_types.h"
 #include "porting/ei_classifier_porting.h"
 #include "core1_thread.h"
-#include "fake_data.h"
+#include "accelerometer.h"
 
 #define UART_ID uart0
 #define BAUD_RATE 115200
@@ -100,9 +100,12 @@ void setup_uart()
 int main()
 {
   ei_impulse_result_t res = {nullptr};
+  float acceleration[EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME];
+  uint64_t last_sample_time = 0;
 
   stdio_init_all();
   setup_uart();
+  accel_init();
   core1_run();
 
   while (true)
@@ -114,37 +117,27 @@ int main()
       if(queue_try_remove(&results_queue, &res)) {
         ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d ms.): \n",
                   res.timing.dsp, res.timing.classification, res.timing.anomaly);
-
-        // print the predictions
-        ei_printf("[");
         for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++)
         {
-          ei_printf("%.5f", res.classification[ix].value);
-#if EI_CLASSIFIER_HAS_ANOMALY == 1
-          ei_printf(", ");
-#else
-          if (ix != EI_CLASSIFIER_LABEL_COUNT - 1)
-          {
-            ei_printf(", ");
-          }
-#endif
+          ei_printf("\t%s: %.5f\n", res.classification[ix].label,
+                                    res.classification[ix].value);
         }
 #if EI_CLASSIFIER_HAS_ANOMALY == 1
-        printf("%.3f", res.anomaly);
+        ei_printf("\tanomaly score: %.3f\n", res.anomaly);
 #endif
-        printf("]\n");
         ei_sleep(2000);
       }
 
-      // add samples to queue, one sample per main loop iteration (like using real sensor)
-      for(int i = 0; i < EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME; i++) {
-        if(queue_try_add(&data_queue, &features[features_offset + i]) == false) {
-          // ei_printf("Data queue full!\n");
-          break;
+      // read sample every 10000 us = 10ms (= 100 Hz)
+      if(ei_read_timer_us() - last_sample_time >= 10000) {
+        accel_get_data(acceleration);
+        for(int i=0; i<EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME; i++) {
+          if(queue_try_add(&data_queue, &acceleration[i]) == false) {
+            // ei_printf("Data queue full!\n");
+            break;
+          }
         }
-      }
-      if((features_offset += EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME) >= features_size) {
-        features_offset = 0;
+        last_sample_time = ei_read_timer_us();
       }
     }
   }
